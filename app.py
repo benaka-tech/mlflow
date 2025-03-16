@@ -1,5 +1,5 @@
 # Install required packages (run this in your terminal or environment)
-# pip install prefect mlflow scikit-learn pandas matplotlib seaborn flask
+# pip install "flask[async]" prefect mlflow scikit-learn pandas matplotlib seaborn
 
 # ------------------------------ #
 #         Import Libraries       #
@@ -10,7 +10,9 @@ import pandas as pd
 import numpy as np
 import mlflow
 import mlflow.sklearn
-from prefect import task, flow  # Prefect 2 API
+from prefect import task, flow, get_run_logger  # Prefect 2 API
+from prefect.server.schemas.schedules import IntervalSchedule
+from prefect.client.orchestration import get_client
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, roc_auc_score, precision_score, recall_score, f1_score
@@ -46,7 +48,8 @@ def load_data():
     if not os.path.exists(file_path):
         raise FileNotFoundError("File 'creditcard.csv' not found. Please ensure it exists in the working directory.")
     df = pd.read_csv(file_path)
-    print("Data loaded successfully with shape:", df.shape)
+    logger = get_run_logger()
+    logger.info(f"Data loaded successfully with shape: {df.shape}")
     return df
 
 @task
@@ -55,10 +58,11 @@ def display_statistics(df):
     [Sub-Objective 1.3: Data Pre-processing]
     Displays summary statistics and data types of the dataset to help understand its structure.
     """
-    print("----- Data Info -----")
-    print(df.info())
-    print("\n----- Summary Statistics -----")
-    print(df.describe())
+    logger = get_run_logger()
+    logger.info("----- Data Info -----")
+    logger.info(df.info())
+    logger.info("\n----- Summary Statistics -----")
+    logger.info(df.describe())
     return True
 
 @task
@@ -70,15 +74,16 @@ def preprocess_data(df):
       - Converting the target ('Class') to integer.
       - Normalizing the 'Time' and 'Amount' columns if present.
     """
+    logger = get_run_logger()
     # Check for missing values and impute numeric columns if needed
     if df.isnull().sum().sum() > 0:
         numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
         for col in numeric_cols:
             if df[col].isnull().sum() > 0:
                 df[col].fillna(df[col].median(), inplace=True)
-        print("Missing values imputed for numeric columns.")
+        logger.info("Missing values imputed for numeric columns.")
     else:
-        print("No missing values found.")
+        logger.info("No missing values found.")
     
     # Ensure target is integer
     df['Class'] = df['Class'].astype(int)
@@ -93,33 +98,11 @@ def preprocess_data(df):
     
     if cols_to_normalize:
         df[cols_to_normalize] = scaler.fit_transform(df[cols_to_normalize])
-        print(f"Normalized columns: {cols_to_normalize}")
+        logger.info(f"Normalized columns: {cols_to_normalize}")
     else:
-        print("No columns to normalize.")
+        logger.info("No columns to normalize.")
     
-    print("Preprocessing completed.")
-    return df
-    """
-    [Sub-Objective 1.3: Data Pre-processing]
-    Preprocesses the dataset by:
-      - Checking for missing numeric values and imputing them with the median.
-      - Converting the target ('Class') to integer.
-      - Normalizing the 'Time' and 'Amount' columns using StandardScaler.
-    """
-    if df.isnull().sum().sum() > 0:
-        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-        for col in numeric_cols:
-            if df[col].isnull().sum() > 0:
-                df[col].fillna(df[col].median(), inplace=True)
-        print("Missing values imputed for numeric columns.")
-    else:
-        print("No missing values found.")
-    
-    df['Class'] = df['Class'].astype(int)
-    
-    scaler = StandardScaler()
-    df[['Time', 'Amount']] = scaler.fit_transform(df[['Time', 'Amount']])
-    print("Preprocessing completed.")
+    logger.info("Preprocessing completed.")
     return df
 
 @task
@@ -130,6 +113,7 @@ def perform_eda(df):
       - Plotting and saving a correlation heatmap.
       - Plotting and saving a histogram for the 'Amount' feature.
     """
+    logger = get_run_logger()
     # Create correlation heatmap
     plt.figure(figsize=(12,10))
     corr = df.corr()
@@ -138,7 +122,7 @@ def perform_eda(df):
     heatmap_file = "correlation_heatmap.png"
     plt.savefig(heatmap_file)
     plt.close()
-    print("Correlation heatmap saved as:", heatmap_file)
+    logger.info(f"Correlation heatmap saved as: {heatmap_file}")
     
     # Create histogram for 'Amount'
     plt.figure(figsize=(8,6))
@@ -147,7 +131,7 @@ def perform_eda(df):
     amount_hist_file = "amount_histogram.png"
     plt.savefig(amount_hist_file)
     plt.close()
-    print("Amount histogram saved as:", amount_hist_file)
+    logger.info(f"Amount histogram saved as: {amount_hist_file}")
     
     return heatmap_file, amount_hist_file
 
@@ -158,6 +142,7 @@ def train_models(df):
     Splits the data into training and testing sets (70/30), trains two models (RandomForestClassifier and LogisticRegression),
     evaluates them using multiple metrics, logs parameters and metrics to MLflow, and generates a feature importance plot.
     """
+    logger = get_run_logger()
     X = df.drop('Class', axis=1)
     y = df['Class']
     
@@ -201,7 +186,7 @@ def train_models(df):
             **metrics_rf,
             "feature_importance_plot": fi_file
         }
-        print("RandomForest training completed. MLflow Run ID:", run_rf.info.run_id)
+        logger.info(f"RandomForest training completed. MLflow Run ID: {run_rf.info.run_id}")
     
     # Logistic Regression Model
     with mlflow.start_run(run_name="LogisticRegression") as run_lr:
@@ -224,7 +209,7 @@ def train_models(df):
             "run_id": run_lr.info.run_id,
             **metrics_lr
         }
-        print("LogisticRegression training completed. MLflow Run ID:", run_lr.info.run_id)
+        logger.info(f"LogisticRegression training completed. MLflow Run ID: {run_lr.info.run_id}")
     
     # Update global pipeline details for API access (Sub-Objective 3)
     pipeline_details.update({
@@ -269,6 +254,36 @@ if __name__ == "__main__":
           - Timestamp of the pipeline run.
         """
         return jsonify(pipeline_details)
+    
+    @app.route("/flow_details", methods=["GET"])
+    async def get_flow_details():
+        """
+        API endpoint to retrieve flow details from Prefect.
+        """
+        async with get_client() as client:
+            flow_runs = await client.read_flow_runs()
+            flow_details = [{"id": flow_run.id, "name": flow_run.name, "state": str(flow_run.state)} for flow_run in flow_runs]
+        return jsonify(flow_details)
+    
+    @app.route("/deployment_details", methods=["GET"])
+    async def get_deployment_details():
+        """
+        API endpoint to retrieve deployment details from Prefect.
+        """
+        async with get_client() as client:
+            deployments = await client.read_deployments()
+            deployment_details = [{"id": deployment.id, "name": deployment.name, "schedule": deployment.schedule} for deployment in deployments]
+        return jsonify(deployment_details)
+    
+    @app.route("/task_run_details", methods=["GET"])
+    async def get_task_run_details():
+        """
+        API endpoint to retrieve task run details from Prefect.
+        """
+        async with get_client() as client:
+            task_runs = await client.read_task_runs()
+            task_run_details = [{"id": task_run.id, "name": task_run.name, "state": str(task_run.state)} for task_run in task_runs]
+        return jsonify(task_run_details)
     
     # Run the Flask API server
     app.run(host="0.0.0.0", port=5000)
