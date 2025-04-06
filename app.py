@@ -103,6 +103,11 @@ def preprocess_data(df):
         logger.info("No columns to normalize.")
     
     logger.info("Preprocessing completed.")
+    
+    # Print the first 5 rows of the preprocessed dataset
+    print("\nFirst 5 rows of the preprocessed dataset:")
+    print(df.head())
+    
     return df
 
 @task
@@ -138,84 +143,55 @@ def perform_eda(df):
 @task
 def train_models(df):
     """
-    [Sub-Objective 2: Machine Learning Pipeline]
-    Splits the data into training and testing sets (70/30), trains two models (RandomForestClassifier and LogisticRegression),
-    evaluates them using multiple metrics, logs parameters and metrics to MLflow, and generates a feature importance plot.
+    Trains Random Forest and Logistic Regression models, logs metrics to MLflow, and evaluates performance.
     """
     logger = get_run_logger()
-    X = df.drop('Class', axis=1)
-    y = df['Class']
-    
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.3, random_state=42, stratify=y
-    )
-    
-    mlflow.set_experiment("CreditCard_Fraud_Detection_Experiment")
+    X = df.drop(columns=["Class"])
+    y = df["Class"]
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
     model_results = {}
-    
-    # RandomForest Model
+
+    # Train Random Forest
+    logger.info("Training Random Forest Classifier...")
     with mlflow.start_run(run_name="RandomForest") as run_rf:
-        rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
+        rf_model = RandomForestClassifier(random_state=42)
         rf_model.fit(X_train, y_train)
         y_pred_rf = rf_model.predict(X_test)
-        
-        metrics_rf = {
+        rf_metrics = {
             "accuracy": accuracy_score(y_test, y_pred_rf),
             "precision": precision_score(y_test, y_pred_rf),
             "recall": recall_score(y_test, y_pred_rf),
             "f1_score": f1_score(y_test, y_pred_rf),
-            "auc": roc_auc_score(y_test, rf_model.predict_proba(X_test)[:,1])
+            "auc": roc_auc_score(y_test, rf_model.predict_proba(X_test)[:, 1]),
         }
-        mlflow.log_param("model_rf", "RandomForestClassifier")
-        mlflow.log_param("n_estimators", 100)
-        for key, value in metrics_rf.items():
-            mlflow.log_metric(key, value)
-        
-        feature_importances = rf_model.feature_importances_
-        features = X.columns
-        plt.figure(figsize=(10,6))
-        sns.barplot(x=feature_importances, y=features)
-        plt.title("Feature Importances (RandomForest)")
-        fi_file = "feature_importance.png"
-        plt.savefig(fi_file)
-        plt.close()
-        mlflow.log_artifact(fi_file)
-        
-        model_results["RandomForest"] = {
-            "run_id": run_rf.info.run_id,
-            **metrics_rf,
-            "feature_importance_plot": fi_file
-        }
-        logger.info(f"RandomForest training completed. MLflow Run ID: {run_rf.info.run_id}")
-    
-    # Logistic Regression Model
+        mlflow.log_metrics(rf_metrics)
+        logger.info(f"Random Forest Metrics: {rf_metrics}")
+        model_results["RandomForest"] = rf_metrics
+
+    # Train Logistic Regression
+    logger.info("Training Logistic Regression...")
     with mlflow.start_run(run_name="LogisticRegression") as run_lr:
         lr_model = LogisticRegression(max_iter=1000, random_state=42)
         lr_model.fit(X_train, y_train)
         y_pred_lr = lr_model.predict(X_test)
-        
-        metrics_lr = {
+        lr_metrics = {
             "accuracy": accuracy_score(y_test, y_pred_lr),
             "precision": precision_score(y_test, y_pred_lr),
             "recall": recall_score(y_test, y_pred_lr),
             "f1_score": f1_score(y_test, y_pred_lr),
-            "auc": roc_auc_score(y_test, lr_model.predict_proba(X_test)[:,1])
+            "auc": roc_auc_score(y_test, lr_model.predict_proba(X_test)[:, 1]),
         }
-        mlflow.log_param("model_lr", "LogisticRegression")
-        for key, value in metrics_lr.items():
-            mlflow.log_metric(key, value)
-        
-        model_results["LogisticRegression"] = {
-            "run_id": run_lr.info.run_id,
-            **metrics_lr
-        }
-        logger.info(f"LogisticRegression training completed. MLflow Run ID: {run_lr.info.run_id}")
-    
-    # Update global pipeline details for API access (Sub-Objective 3)
+        mlflow.log_metrics(lr_metrics)
+        logger.info(f"Logistic Regression Metrics: {lr_metrics}")
+        model_results["LogisticRegression"] = lr_metrics
+
+    # Update global pipeline details for API access
     pipeline_details.update({
-        'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        'models': model_results
+        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "models": model_results,
     })
+
     return model_results
 
 # ------------------------------ #
@@ -268,11 +244,20 @@ if __name__ == "__main__":
     @app.route("/deployment_details", methods=["GET"])
     async def get_deployment_details():
         """
-        API endpoint to retrieve deployment details from Prefect.
+        API endpoint to retrieve all deployment details from Prefect.
         """
         async with get_client() as client:
             deployments = await client.read_deployments()
-            deployment_details = [{"id": deployment.id, "name": deployment.name, "schedule": deployment.schedule} for deployment in deployments]
+            deployment_details = [
+                {
+                    "id": deployment.id,
+                    "name": deployment.name,
+                    "flow_id": deployment.flow_id,
+                    "parameters": deployment.parameters,
+                    "tags": deployment.tags,
+                }
+                for deployment in deployments
+            ]
         return jsonify(deployment_details)
     
     @app.route("/task_run_details", methods=["GET"])
